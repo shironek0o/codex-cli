@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ponytail"
+  short_description: "Minimal complete changes with clear goals and checks"
+  default_prompt: "Use $ponytail to solve this coding task with minimal complete changes and verifiable results."
