@@ -2,7 +2,12 @@
 set -eu
 
 CDPATH= cd -- "$(dirname -- "$0")"
+codex_home="${CODEX_HOME:-$HOME/.codex}"
 theme=themes/solarized-osaka.tmTheme
+if [ ! -r AGENTS.md ]; then
+    echo 'Missing AGENTS.md.' >&2
+    exit 1
+fi
 if [ ! -r "$theme" ]; then
     echo 'Missing Solarized Osaka theme file.' >&2
     exit 1
@@ -26,11 +31,15 @@ fi
 
 echo '[2/4] Set up shared Codex sessions'
 fish --no-config ./session-sharing/install.fish
-echo '[3/4] Install the Solarized Osaka theme'
-install -Dm644 -- "$theme" "${CODEX_HOME:-$HOME/.codex}/$theme"
+echo '[3/4] Install Codex instructions and the Solarized Osaka theme'
+agents_destination="$codex_home/AGENTS.md"
+if ! cmp -s -- AGENTS.md "$agents_destination"; then
+    install -Dm644 -T --backup=numbered -- AGENTS.md "$agents_destination"
+fi
+install -Dm644 -- "$theme" "$codex_home/$theme"
 echo '[4/4] Install Codex skills'
 skill_root="$HOME/.agents/skills"
-codex_skill_root="${CODEX_HOME:-$HOME/.codex}/skills"
+codex_skill_root="$codex_home/skills"
 if [ -d "$skill_root/inkdrop-plan" ] && [ ! -e "$skill_root/inkdrop" ]; then
     mv -T -- "$skill_root/inkdrop-plan" "$skill_root/inkdrop"
 fi

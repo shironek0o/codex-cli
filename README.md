@@ -14,6 +14,8 @@ From the project root, run:
 
 The installer reuses an existing `codex-auth`. On a fresh machine, it installs `@loongphy/codex-auth@0.4.0` under `~/.local` and adds its binary directory to the Fish search path if needed. It then tests session sharing against your installed Codex CLI using synthetic conversations. Once the test passes, it installs the adapter, theme, and skills.
 
+The installer also copies [AGENTS.md](AGENTS.md) to `$CODEX_HOME/AGENTS.md` (default `~/.codex/AGENTS.md`). If the destination already has different instructions, it saves a numbered backup beside it.
+
 ## Use
 
 Open a new Fish terminal in your project directory. To add an account for the first time, run `codex-auth login`. To switch to a saved account and continue a conversation, run:
