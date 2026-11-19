@@ -31,6 +31,9 @@ install -Dm644 -- "$theme" "${CODEX_HOME:-$HOME/.codex}/$theme"
 echo '[4/4] Install Codex skills'
 skill_root="$HOME/.agents/skills"
 codex_skill_root="${CODEX_HOME:-$HOME/.codex}/skills"
+if [ -d "$skill_root/inkdrop-plan" ] && [ ! -e "$skill_root/inkdrop" ]; then
+    mv -T -- "$skill_root/inkdrop-plan" "$skill_root/inkdrop"
+fi
 for skill in skills/*; do
     [ -f "$skill/SKILL.md" ] || continue
     name=${skill##*/}
@@ -42,25 +45,10 @@ for skill in skills/*; do
     cp -a -- "$skill/." "$destination/"
     printf '  Installed %s\n' "$name"
 done
-
-inkdrop_ref=595e89746b5a48fda47cd81d9d39e1e9dcf49936
-for name in note-taking fill-out-template; do
-    if [ -f "$skill_root/$name/SKILL.md" ] || [ -f "$codex_skill_root/$name/SKILL.md" ]; then
-        printf '  Kept existing %s\n' "$name"
-        continue
-    fi
-    download=$(mktemp)
-    trap 'rm -- "$download"' EXIT
-    curl -fsSL "https://raw.githubusercontent.com/inkdropapp/skills/$inkdrop_ref/skills/$name/SKILL.md" -o "$download"
-    install -Dm644 -- "$download" "$skill_root/$name/SKILL.md"
-    rm -- "$download"
-    trap - EXIT
-    printf '  Installed %s\n' "$name"
-done
 cat <<'EOF'
 
 Setup complete.
   In a new Fish terminal: run codex-auth switch, then codex resume.
   In Codex: open /theme, choose solarized-osaka (custom), and press Enter.
-  In Codex: type $ to browse your skills, or type $inkdrop-plan to plan in Inkdrop.
+  In Codex: type $ to browse your skills, or type $inkdrop to plan in Inkdrop.
 EOF

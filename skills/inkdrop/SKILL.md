@@ -1,6 +1,6 @@
 ---
-name: inkdrop-plan
-description: Draft an implementation plan and save it to a selected Inkdrop note. Use when the user invokes $inkdrop-plan or explicitly asks to plan a coding task in Inkdrop.
+name: inkdrop
+description: Draft an implementation plan and save it to a selected Inkdrop note. Use when the user invokes $inkdrop or explicitly asks to plan a coding task in Inkdrop.
 ---
 
 # Plan in Inkdrop

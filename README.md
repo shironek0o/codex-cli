@@ -42,18 +42,14 @@ Type `$` in Codex to browse installed skills. The installer copies the full fold
 | Skill | What it does |
 | --- | --- |
 | `$ponytail` | Make the smallest maintainable change that meets the request. |
-| `$inkdrop-plan` | Draft an implementation plan and write it to a note you select. |
-| `$note-taking` | Use Inkdrop Markdown conventions when writing notes. |
-| `$fill-out-template` | Fill in an existing Inkdrop note created from a template. |
-
-The last two come from a pinned revision of [Inkdrop's official skills](https://github.com/inkdropapp/skills). A fresh install needs `curl` and network access to download them. The installer keeps existing copies. Set up your Inkdrop MCP connection separately on each machine.
+| `$inkdrop` | Draft an implementation plan and write it to a note you select. |
 
 ## Plan in Inkdrop
 
-Set up [Inkdrop MCP for Codex](https://docs.inkdrop.app/reference/mcp-server#codex) first. In a regular Codex chat, enter `$inkdrop-plan` to choose an existing note or a notebook for a new note. Search by title and select a result by number, or paste a note link or ID to go directly to it. You can copy the link from Inkdrop or drag the note into the terminal.
+Set up [Inkdrop MCP for Codex](https://docs.inkdrop.app/reference/mcp-server#codex) first. In a regular Codex chat, enter `$inkdrop` to choose an existing note or a notebook for a new note. Search by title and select a result by number, or paste a note link or ID to go directly to it. You can copy the link from Inkdrop or drag the note into the terminal.
 
 ```text
-$inkdrop-plan inkdrop://note/<id>
+$inkdrop inkdrop://note/<id>
 ```
 
 The skill drafts the plan, saves it to the selected note, returns its link, and waits for approval before implementation. Codex reserves `/plan` for its built-in Plan Mode. The installer adds the skill under `~/.agents/skills/` so it stays available across official CLI updates.
