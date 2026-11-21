@@ -4,7 +4,7 @@ Personal tools and settings for the Codex CLI. Switch accounts with `codex-auth`
 
 ## Install
 
-The prebuilt adapter runs on x86_64 Linux with kernel 6.1 or later. Install the official Codex CLI and Fish first. If you also need `codex-auth`, have Node.js and npm available.
+The full installer requires the official Codex CLI and Fish on your `PATH`. The prebuilt session-sharing adapter runs on x86_64 Linux with kernel 6.1 or later.
 
 From the project root, run:
 
@@ -12,9 +12,15 @@ From the project root, run:
 ./install.sh
 ```
 
-The installer reuses an existing `codex-auth`. On a fresh machine, it installs `@loongphy/codex-auth@0.4.0` under `~/.local` and adds its binary directory to the Fish search path if needed. It then tests session sharing against your installed Codex CLI using synthetic conversations. Once the test passes, it installs the adapter, theme, and skills.
+The installer reuses an existing `codex-auth`. On a fresh machine, it installs version 0.4.0 under `~/.local` and adds `~/.local/bin` to the Fish search path if needed. It uses npm when Node.js and npm are available. On x86_64 Linux without them, it downloads and verifies the [standalone release](https://github.com/Loongphy/codex-auth/releases/tag/v0.4.0) using `curl`, `sha256sum`, and `tar`. The standalone binary requires glibc 2.28 or later. Both paths install to your home directory without `sudo`. The installer tests session sharing against your installed Codex CLI using synthetic conversations before installing the adapter.
 
-The installer also copies [AGENTS.md](AGENTS.md) to `$CODEX_HOME/AGENTS.md` (default `~/.codex/AGENTS.md`). If the destination already has different instructions, it saves a numbered backup beside it.
+To install AGENTS.md, the theme, and the skills using just the shell and standard Linux utilities, run:
+
+```sh
+./install.sh --settings-only
+```
+
+Both modes copy [AGENTS.md](AGENTS.md) to `$CODEX_HOME/AGENTS.md` (default `~/.codex/AGENTS.md`). If the destination already has different instructions, the installer saves a numbered backup beside it.
 
 ## Use
 
