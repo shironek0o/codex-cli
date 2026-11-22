@@ -13,6 +13,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use tungstenite::{Message, WebSocket};
 
+mod quota_poll;
+mod quota_wait;
 mod self_test;
 mod terminal_output;
 mod usage_handoff;
@@ -304,6 +306,12 @@ fn serve(
                                     if kind == usage_handoff::ResumeKind::Goal
                                         && handoff.goal_attempted(&thread)
                                     {
+                                        quota_wait::schedule_or_warn(
+                                            &mut client,
+                                            upstream_path,
+                                            &thread,
+                                            "Automatic account switch already attempted.",
+                                        )?;
                                         continue;
                                     }
                                     usage_handoff::warn(
@@ -330,12 +338,33 @@ fn serve(
                                                 kind,
                                             )?;
                                         }
-                                        Ok(None) => {}
-                                        Err(error) => usage_handoff::warn(
+                                        Ok(None) => quota_wait::schedule_or_warn(
                                             &mut client,
-                                            Some(&thread),
-                                            &format!("Automatic account switch stopped: {error}."),
+                                            upstream_path,
+                                            &thread,
+                                            "Automatic account switch already attempted.",
                                         )?,
+                                        Err(error) => {
+                                            let reason = format!(
+                                                "Automatic account switch stopped: {error}."
+                                            );
+                                            if kind == usage_handoff::ResumeKind::Goal
+                                                || handoff.goal_attempted(&thread)
+                                            {
+                                                quota_wait::schedule_or_warn(
+                                                    &mut client,
+                                                    upstream_path,
+                                                    &thread,
+                                                    &reason,
+                                                )?;
+                                            } else {
+                                                usage_handoff::warn(
+                                                    &mut client,
+                                                    Some(&thread),
+                                                    &reason,
+                                                )?;
+                                            }
+                                        }
                                     }
                                 }
                                 usage_handoff::Event::Resumed(thread) => {
@@ -534,6 +563,16 @@ fn run_client(binary: &Path, args: &[String]) -> Result<i32> {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--wait-for-goal-quota")
+    {
+        if let Err(error) = quota_wait::run(&args[1..]) {
+            eprintln!("Goal quota watcher: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if args == ["--version"] {
         println!("codex-session-sharing {}", env!("CARGO_PKG_VERSION"));
         return;

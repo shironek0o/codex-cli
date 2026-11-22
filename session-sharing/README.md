@@ -1,6 +1,6 @@
 # Local session sharing for Codex
 
-Version 1.3.1 lets you switch accounts and continue conversations in the native Codex interface. The `codex resume` picker, `codex resume --last`, and the in-app `/resume` command can find sessions from other accounts that use the same local `CODEX_HOME`.
+Version 1.4.0 lets you switch accounts and continue conversations in the native Codex interface. The `codex resume` picker, `codex resume --last`, and the in-app `/resume` command can find sessions from other accounts that use the same local `CODEX_HOME`.
 
 ## Install
 
@@ -31,7 +31,9 @@ Save each ChatGPT account with `codex-auth login`, then use the installed `codex
 
 Goal mode also triggers a handoff when a turn started by the goal hits the account usage limit. The adapter reactivates the existing goal through Codex in the same session. A paused goal or a goal that exhausted its own token budget retains its state.
 
-Automatic continuation attempts one handoff per submitted turn or goal run. It requires `codex-auth` 0.4.0 or later and a Codex CLI with native reconnect support, verified with 0.171.0. If another session is still running or no account has confirmed quota, the terminal reports the reason. For a terminal that should keep its current account, start it with `CODEX_AUTO_SWITCH_OFF=1 codex`. The normal `codex exec` and explicit `--remote` paths keep their existing behavior.
+When an immediate handoff is unavailable and the terminal reports that the goal is queued, a background process checks the active account's quota. It reactivates the same goal once Codex confirms that included usage is available. The process keeps checking after you close the terminal and can recover the same goal from another quota stop. Pausing or clearing the goal cancels the wait. Keep the machine running and the shared Codex daemon available. This uses `setsid` from util-linux.
+
+Automatic continuation attempts one account switch per submitted turn or goal run. It requires `codex-auth` 0.4.0 or later and a Codex CLI with native reconnect support, verified with 0.171.0. For a terminal without automatic switching or quota recovery, start it with `CODEX_AUTO_SWITCH_OFF=1 codex`. The normal `codex exec` and explicit `--remote` paths keep their existing behavior.
 
 ## Install on another machine
 

@@ -295,14 +295,7 @@ pub fn switch_account(
         .parent()
         .and_then(Path::parent)
         .ok_or("invalid daemon socket path")?;
-    let lock = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(home.join("session-sharing-handoff.lock"))?;
-    lock.try_lock()
-        .map_err(|_| "another account handoff is in progress")?;
+    let _lock = lock_handoff(home)?;
     let kind = match goal_is_limited(upstream, failed_thread) {
         Ok(true) => ResumeKind::Goal,
         Ok(false) if kind == ResumeKind::Goal => {
@@ -335,6 +328,18 @@ pub fn switch_account(
         Some("restarted") => Ok(Some((Switch::Restarted, kind))),
         _ => Err("the daemon did not confirm that it loaded the new account".into()),
     }
+}
+
+pub(crate) fn lock_handoff(home: &Path) -> Result<std::fs::File> {
+    let lock = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(home.join("session-sharing-handoff.lock"))?;
+    lock.try_lock()
+        .map_err(|_| "another account handoff is in progress")?;
+    Ok(lock)
 }
 
 fn auth_command(home: &Path, args: &[&str], failure: &'static str) -> Result<Value> {
@@ -380,7 +385,7 @@ fn eligible_account(list: &Value) -> Option<&str> {
     })
 }
 
-fn control_connection(upstream: &Path) -> Result<WebSocket<UnixStream>> {
+pub(crate) fn control_connection(upstream: &Path) -> Result<WebSocket<UnixStream>> {
     let mut backend = connect_backend(upstream)?;
     request(
         &mut backend,
@@ -426,7 +431,11 @@ fn check_idle(upstream: &Path, failed_thread: &str) -> Result<()> {
     Ok(())
 }
 
-fn request(backend: &mut WebSocket<UnixStream>, method: &str, params: Value) -> Result<Value> {
+pub(crate) fn request(
+    backend: &mut WebSocket<UnixStream>,
+    method: &str,
+    params: Value,
+) -> Result<Value> {
     backend.send(rpc_request("check", method, params))?;
     loop {
         match backend.read()? {
