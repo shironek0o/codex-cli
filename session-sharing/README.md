@@ -33,7 +33,17 @@ Goal mode also triggers a handoff when a turn started by the goal hits the accou
 
 When an immediate handoff is unavailable and the terminal reports that the goal is queued, a background process checks the active account's quota. It reactivates the same goal once Codex confirms that included usage is available. The process keeps checking after you close the terminal and can recover the same goal from another quota stop. Pausing or clearing the goal cancels the wait. Keep the machine running and the shared Codex daemon available. This uses `setsid` from util-linux.
 
-Automatic continuation attempts one account switch per submitted turn or goal run. It requires `codex-auth` 0.4.0 or later and a Codex CLI with native reconnect support, verified with 0.171.0. For a terminal without automatic switching or quota recovery, start it with `CODEX_AUTO_SWITCH_OFF=1 codex`. The normal `codex exec` and explicit `--remote` paths keep their existing behavior.
+Automatic continuation attempts one account switch per submitted turn or goal run. It requires `codex-auth` 0.4.0 or later and a Codex CLI with native reconnect support, verified with 0.171.0. The normal `codex exec` and explicit `--remote` paths keep their existing behavior.
+
+In Fish, check or change the setting with these commands:
+
+```fish
+codex auto-switch status
+codex auto-switch off
+codex auto-switch on
+```
+
+The setting defaults to on and is saved per `CODEX_HOME` (default `~/.codex`). Turning it off disables automatic quota checks, account switching, and Goal recovery for subsequent Codex launches. Existing sessions and queued Goals keep running with their original settings. Use `CODEX_AUTO_SWITCH_OFF=1 codex` to turn it off for one launch.
 
 ## Install on another machine
 
