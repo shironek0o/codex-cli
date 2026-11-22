@@ -1,6 +1,6 @@
 # Local session sharing for Codex
 
-Version 1.3.0 lets you switch accounts and continue conversations in the native Codex interface. The `codex resume` picker, `codex resume --last`, and the in-app `/resume` command can find sessions from other accounts that use the same local `CODEX_HOME`.
+Version 1.3.1 lets you switch accounts and continue conversations in the native Codex interface. The `codex resume` picker, `codex resume --last`, and the in-app `/resume` command can find sessions from other accounts that use the same local `CODEX_HOME`.
 
 ## Install
 
@@ -29,7 +29,9 @@ When upgrading from 1.0.0, exit any Codex windows started with that adapter befo
 
 Save each ChatGPT account with `codex-auth login`, then use the installed `codex` Fish function. When a turn submitted through that terminal fails with an account usage limit, the adapter checks the saved accounts for available quota. It switches to one with confirmed quota if the shared daemon has no other running turns. If the daemon restarts to load the new login, the native interface reconnects to the same session. The adapter then asks Codex to continue the unfinished work using that session's history.
 
-Automatic continuation attempts one handoff per submitted turn. It requires `codex-auth` 0.4.0 or later and a Codex CLI with native reconnect support, verified with 0.171.0. If another session is still running or no account has confirmed quota, the terminal reports the reason. For a terminal that should keep its current account, start it with `CODEX_AUTO_SWITCH_OFF=1 codex`. The normal `codex exec` and explicit `--remote` paths keep their existing behavior.
+Goal mode also triggers a handoff when a turn started by the goal hits the account usage limit. The adapter reactivates the existing goal through Codex in the same session. A paused goal or a goal that exhausted its own token budget retains its state.
+
+Automatic continuation attempts one handoff per submitted turn or goal run. It requires `codex-auth` 0.4.0 or later and a Codex CLI with native reconnect support, verified with 0.171.0. If another session is still running or no account has confirmed quota, the terminal reports the reason. For a terminal that should keep its current account, start it with `CODEX_AUTO_SWITCH_OFF=1 codex`. The normal `codex exec` and explicit `--remote` paths keep their existing behavior.
 
 ## Install on another machine
 

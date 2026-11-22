@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
@@ -14,38 +14,65 @@ use crate::{Result, connect_backend};
 
 const REQUEST_ID: &str = "codex-session-sharing/continue";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResumeKind {
+    Turn,
+    Goal,
+}
+
 #[derive(Default)]
-pub struct Handoff(Mutex<Option<(String, Instant)>>);
+pub struct Handoff {
+    pending: Mutex<Option<(String, ResumeKind, Instant)>>,
+    attempted_goals: Mutex<HashSet<String>>,
+}
 
 impl Handoff {
-    pub fn remember(&self, thread_id: String) {
-        *self.0.lock().unwrap() = Some((thread_id, Instant::now()));
+    pub fn remember(&self, thread_id: String, kind: ResumeKind) {
+        *self.pending.lock().unwrap() = Some((thread_id, kind, Instant::now()));
     }
 
-    pub fn take(&self, thread_id: &str) -> bool {
-        let mut pending = self.0.lock().unwrap();
-        if pending
-            .as_ref()
-            .is_some_and(|(id, since)| id == thread_id && since.elapsed() < Duration::from_secs(60))
-        {
-            pending.take();
-            return true;
+    pub fn take(&self, thread_id: &str) -> Option<ResumeKind> {
+        let mut pending = self.pending.lock().unwrap();
+        if pending.as_ref().is_some_and(|(id, _, since)| {
+            id == thread_id && since.elapsed() < Duration::from_secs(60)
+        }) {
+            return pending.take().map(|(_, kind, _)| kind);
         }
-        false
+        None
+    }
+
+    fn mark_goal_attempt(&self, thread: &str) -> bool {
+        self.attempted_goals.lock().unwrap().insert(thread.into())
+    }
+
+    pub fn goal_attempted(&self, thread: &str) -> bool {
+        self.attempted_goals.lock().unwrap().contains(thread)
+    }
+
+    fn reset_goal(&self, thread: &str) {
+        self.attempted_goals.lock().unwrap().remove(thread);
+        self.take(thread);
     }
 }
 
 enum Request {
+    Attach,
     Start(String),
     Resume(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event {
-    Quota(String),
+    Quota(String, ResumeKind),
     Resumed(String),
     ContinuationReply(bool),
     Forward,
+}
+
+#[derive(Default)]
+struct WatchedGoal {
+    completed_turn: Option<String>,
+    quota_turn: Option<String>,
 }
 
 #[derive(Default)]
@@ -53,6 +80,7 @@ pub struct Connection {
     requests: HashMap<String, Request>,
     submitted: HashMap<String, String>,
     early_completion: HashMap<String, (String, bool)>,
+    goals: HashMap<String, WatchedGoal>,
 }
 
 impl Connection {
@@ -60,16 +88,38 @@ impl Connection {
         let Ok(message) = serde_json::from_str::<Value>(text) else {
             return;
         };
-        let (Some(id), Some(thread)) = (message.get("id"), message["params"]["threadId"].as_str())
-        else {
+        let Some(id) = message.get("id") else {
             return;
         };
-        let request = match message["method"].as_str() {
+        let method = message["method"].as_str();
+        if matches!(method, Some("thread/start" | "thread/fork")) {
+            self.requests.insert(id.to_string(), Request::Attach);
+            return;
+        }
+        let Some(thread) = message["params"]["threadId"].as_str() else {
+            return;
+        };
+        let request = match method {
             Some("turn/start") => {
                 handoff.take(thread);
                 Request::Start(thread.into())
             }
             Some("thread/resume") => Request::Resume(thread.into()),
+            Some("thread/goal/clear") => {
+                handoff.reset_goal(thread);
+                return;
+            }
+            Some("thread/goal/set") => {
+                handoff.take(thread);
+                if message["params"]["status"] == "active" {
+                    handoff.reset_goal(thread);
+                }
+                return;
+            }
+            Some("thread/unsubscribe") => {
+                self.goals.remove(thread);
+                return;
+            }
             _ => return,
         };
         self.requests.insert(id.to_string(), request);
@@ -79,6 +129,24 @@ impl Connection {
         let Ok(message) = serde_json::from_str::<Value>(text) else {
             return Event::Forward;
         };
+        if message["method"] == "thread/goal/updated" {
+            let params = &message["params"];
+            if let Some(thread) = params["threadId"].as_str()
+                && let Some(goal) = self.goals.get_mut(thread)
+            {
+                if params["goal"]["status"] == "usageLimited" {
+                    if let Some(turn) = params["turnId"].as_str() {
+                        if goal.completed_turn.as_deref() == Some(turn) {
+                            return Event::Quota(thread.into(), ResumeKind::Goal);
+                        }
+                        goal.quota_turn = Some(turn.into());
+                    }
+                } else {
+                    goal.quota_turn = None;
+                }
+            }
+            return Event::Forward;
+        }
         if message["method"] == "turn/completed" {
             let params = &message["params"];
             let turn = &params["turn"];
@@ -88,9 +156,17 @@ impl Connection {
             };
             let quota = turn["status"] == "failed"
                 && turn["error"]["codexErrorInfo"] == "usageLimitExceeded";
+            if let Some(goal) = self.goals.get_mut(thread) {
+                goal.completed_turn = Some(id.into());
+                if goal.quota_turn.as_deref() == Some(id) {
+                    goal.quota_turn = None;
+                    self.submitted.remove(id);
+                    return Event::Quota(thread.into(), ResumeKind::Goal);
+                }
+            }
             if let Some(submitted) = self.submitted.remove(id) {
                 if quota && submitted == thread {
-                    return Event::Quota(thread.into());
+                    return Event::Quota(thread.into(), ResumeKind::Turn);
                 }
             } else if self
                 .requests
@@ -109,15 +185,24 @@ impl Connection {
             return Event::Forward;
         }
         if id == REQUEST_ID {
-            return Event::ContinuationReply(message["result"]["turn"]["id"].is_string());
+            return Event::ContinuationReply(
+                message["result"]["turn"]["id"].is_string()
+                    || message["result"]["goal"]["status"] == "active",
+            );
         }
         match self.requests.remove(&id.to_string()) {
+            Some(Request::Attach) => {
+                if let Some(thread) = message["result"]["thread"]["id"].as_str() {
+                    self.goals.entry(thread.into()).or_default();
+                }
+            }
             Some(Request::Start(thread)) => {
                 if let Some(turn) = message["result"]["turn"]["id"].as_str() {
+                    self.goals.entry(thread.clone()).or_default();
                     match self.early_completion.remove(turn) {
                         Some((completed, quota)) if completed == thread => {
                             if quota {
-                                return Event::Quota(thread);
+                                return Event::Quota(thread, ResumeKind::Turn);
                             }
                         }
                         _ => {
@@ -127,6 +212,7 @@ impl Connection {
                 }
             }
             Some(Request::Resume(thread)) if message["result"]["thread"]["id"] == thread => {
+                self.goals.entry(thread.clone()).or_default();
                 return Event::Resumed(thread);
             }
             _ => {}
@@ -135,7 +221,42 @@ impl Connection {
     }
 }
 
-pub fn resume(backend: &mut WebSocket<UnixStream>, thread: &str) -> Result<()> {
+pub fn resume_or_warn(
+    client: &mut WebSocket<UnixStream>,
+    backend: &mut WebSocket<UnixStream>,
+    upstream: &Path,
+    thread: &str,
+    kind: ResumeKind,
+) -> Result<()> {
+    if let Err(error) = resume(backend, upstream, thread, kind) {
+        warn(
+            client,
+            Some(thread),
+            &format!("Automatic continuation stopped: {error}."),
+        )?;
+    }
+    Ok(())
+}
+
+fn resume(
+    backend: &mut WebSocket<UnixStream>,
+    upstream: &Path,
+    thread: &str,
+    kind: ResumeKind,
+) -> Result<()> {
+    if kind == ResumeKind::Goal {
+        if !goal_is_limited(upstream, thread)? {
+            return Err("the goal is no longer stopped by the usage limit".into());
+        }
+        backend.send(rpc_request(
+            REQUEST_ID,
+            "thread/goal/set",
+            json!({
+                "threadId": thread, "status": "active",
+            }),
+        ))?;
+        return Ok(());
+    }
     backend.send(rpc_request(REQUEST_ID, "turn/start", json!({
         "threadId": thread,
         "input": [{
@@ -164,7 +285,12 @@ pub enum Switch {
     Restarted,
 }
 
-pub fn switch_account(upstream: &Path, failed_thread: &str) -> Result<Switch> {
+pub fn switch_account(
+    upstream: &Path,
+    failed_thread: &str,
+    kind: ResumeKind,
+    handoff: &Handoff,
+) -> Result<Option<(Switch, ResumeKind)>> {
     let home = upstream
         .parent()
         .and_then(Path::parent)
@@ -177,6 +303,17 @@ pub fn switch_account(upstream: &Path, failed_thread: &str) -> Result<Switch> {
         .open(home.join("session-sharing-handoff.lock"))?;
     lock.try_lock()
         .map_err(|_| "another account handoff is in progress")?;
+    let kind = match goal_is_limited(upstream, failed_thread) {
+        Ok(true) => ResumeKind::Goal,
+        Ok(false) if kind == ResumeKind::Goal => {
+            return Err("the goal is no longer stopped by the usage limit".into());
+        }
+        Err(error) if kind == ResumeKind::Goal => return Err(error),
+        _ => ResumeKind::Turn,
+    };
+    if kind == ResumeKind::Goal && !handoff.mark_goal_attempt(failed_thread) {
+        return Ok(None);
+    }
     let accounts = auth_command(
         home,
         &["list", "--api", "--json"],
@@ -194,8 +331,8 @@ pub fn switch_account(upstream: &Path, failed_thread: &str) -> Result<Switch> {
         return Err("codex-auth did not confirm the selected account".into());
     }
     match reply["daemon"].as_str() {
-        Some("reloaded") => Ok(Switch::Reloaded),
-        Some("restarted") => Ok(Switch::Restarted),
+        Some("reloaded") => Ok(Some((Switch::Reloaded, kind))),
+        Some("restarted") => Ok(Some((Switch::Restarted, kind))),
         _ => Err("the daemon did not confirm that it loaded the new account".into()),
     }
 }
@@ -243,7 +380,7 @@ fn eligible_account(list: &Value) -> Option<&str> {
     })
 }
 
-fn check_idle(upstream: &Path, failed_thread: &str) -> Result<()> {
+fn control_connection(upstream: &Path) -> Result<WebSocket<UnixStream>> {
     let mut backend = connect_backend(upstream)?;
     request(
         &mut backend,
@@ -255,6 +392,17 @@ fn check_idle(upstream: &Path, failed_thread: &str) -> Result<()> {
     backend.send(Message::Text(
         json!({"method": "initialized"}).to_string().into(),
     ))?;
+    Ok(backend)
+}
+
+fn goal_is_limited(upstream: &Path, thread: &str) -> Result<bool> {
+    let mut backend = control_connection(upstream)?;
+    let state = request(&mut backend, "thread/goal/get", json!({"threadId": thread}))?;
+    Ok(state["goal"]["status"] == "usageLimited")
+}
+
+fn check_idle(upstream: &Path, failed_thread: &str) -> Result<()> {
+    let mut backend = control_connection(upstream)?;
     let loaded = request(&mut backend, "thread/loaded/list", json!({}))?;
     let threads = loaded["data"]
         .as_array()
@@ -313,6 +461,10 @@ mod tests {
     const START: &str = r#"{"id":7,"method":"turn/start","params":{"threadId":"thread"}}"#;
     const STARTED: &str = r#"{"id":7,"result":{"turn":{"id":"turn"}}}"#;
     const QUOTA: &str = r#"{"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":"failed","error":{"codexErrorInfo":"usageLimitExceeded"}}}}"#;
+    const AUTO_FINISHED: &str = r#"{"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"goal-turn","status":"failed"}}}"#;
+    const GOAL_LIMIT: &str = r#"{"method":"thread/goal/updated","params":{"threadId":"thread","turnId":"goal-turn","goal":{"status":"usageLimited"}}}"#;
+    const ATTACH: &str = r#"{"id":8,"method":"thread/resume","params":{"threadId":"thread"}}"#;
+    const ATTACHED: &str = r#"{"id":8,"result":{"thread":{"id":"thread"}}}"#;
 
     #[test]
     fn only_the_client_that_submitted_a_turn_can_recover_it_once() {
@@ -323,7 +475,7 @@ mod tests {
         assert_eq!(connection.observe_event(STARTED), Event::Forward);
         assert_eq!(
             connection.observe_event(QUOTA),
-            Event::Quota("thread".into())
+            Event::Quota("thread".into(), ResumeKind::Turn)
         );
         assert_eq!(connection.observe_event(QUOTA), Event::Forward);
     }
@@ -335,7 +487,7 @@ mod tests {
         assert_eq!(connection.observe_event(QUOTA), Event::Forward);
         assert_eq!(
             connection.observe_event(STARTED),
-            Event::Quota("thread".into())
+            Event::Quota("thread".into(), ResumeKind::Turn)
         );
     }
 
@@ -358,21 +510,60 @@ mod tests {
     fn resumes_only_the_intended_thread_and_yields_to_user_input() {
         let handoff = Handoff::default();
         let mut connection = Connection::default();
-        handoff.remember("thread".into());
-        connection.observe_request(
-            r#"{"id":8,"method":"thread/resume","params":{"threadId":"thread"}}"#,
-            &handoff,
-        );
+        handoff.remember("thread".into(), ResumeKind::Goal);
+        connection.observe_request(ATTACH, &handoff);
         assert_eq!(
-            connection.observe_event(r#"{"id":8,"result":{"thread":{"id":"thread"}}}"#),
+            connection.observe_event(ATTACHED),
             Event::Resumed("thread".into())
         );
-        assert!(!handoff.take("other"));
-        assert!(handoff.take("thread"));
-        assert!(!handoff.take("thread"));
-        handoff.remember("thread".into());
+        assert_eq!(handoff.take("other"), None);
+        assert_eq!(handoff.take("thread"), Some(ResumeKind::Goal));
+        assert_eq!(handoff.take("thread"), None);
+        handoff.remember("thread".into(), ResumeKind::Turn);
         connection.observe_request(START, &handoff);
-        assert!(!handoff.take("thread"));
+        assert_eq!(handoff.take("thread"), None);
+    }
+
+    #[test]
+    fn detects_a_quota_stopped_goal_without_a_client_turn_request() {
+        for (first, second) in [(GOAL_LIMIT, AUTO_FINISHED), (AUTO_FINISHED, GOAL_LIMIT)] {
+            let handoff = Handoff::default();
+            let mut connection = Connection::default();
+            connection.observe_request(ATTACH, &handoff);
+            connection.observe_event(ATTACHED);
+            assert_eq!(connection.observe_event(first), Event::Forward);
+            assert_eq!(
+                connection.observe_event(second),
+                Event::Quota("thread".into(), ResumeKind::Goal)
+            );
+        }
+    }
+
+    #[test]
+    fn ignores_global_notifications_for_other_threads_and_goal_snapshots() {
+        let mut connection = Connection::default();
+        assert_eq!(connection.observe_event(AUTO_FINISHED), Event::Forward);
+        assert_eq!(connection.observe_event(GOAL_LIMIT), Event::Forward);
+        connection.observe_request(ATTACH, &Handoff::default());
+        connection.observe_event(ATTACHED);
+        let snapshot = GOAL_LIMIT.replace("\"goal-turn\"", "null");
+        assert_eq!(connection.observe_event(&snapshot), Event::Forward);
+        let paused = GOAL_LIMIT.replace("usageLimited", "paused");
+        assert_eq!(connection.observe_event(&paused), Event::Forward);
+        assert_eq!(connection.observe_event(AUTO_FINISHED), Event::Forward);
+    }
+
+    #[test]
+    fn goal_retry_guard_survives_reconnect_and_resets_on_manual_goal_resume() {
+        let handoff = Handoff::default();
+        assert!(handoff.mark_goal_attempt("thread"));
+        let mut reconnected = Connection::default();
+        reconnected.observe_request(ATTACH, &handoff);
+        reconnected.observe_event(ATTACHED);
+        assert!(handoff.goal_attempted("thread"));
+        assert!(!handoff.mark_goal_attempt("thread"));
+        reconnected.observe_request(r#"{"id":9,"method":"thread/goal/set","params":{"threadId":"thread","status":"active"}}"#, &handoff);
+        assert!(handoff.mark_goal_attempt("thread"));
     }
 
     #[test]

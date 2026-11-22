@@ -300,20 +300,37 @@ fn serve(
                         })?;
                         if let Some(handoff) = handoff {
                             match event {
-                                usage_handoff::Event::Quota(thread) => {
+                                usage_handoff::Event::Quota(thread, kind) => {
+                                    if kind == usage_handoff::ResumeKind::Goal
+                                        && handoff.goal_attempted(&thread)
+                                    {
+                                        continue;
+                                    }
                                     usage_handoff::warn(
                                         &mut client,
                                         Some(&thread),
                                         "Account usage limit reached. Checking another saved account…",
                                     )?;
-                                    match usage_handoff::switch_account(upstream_path, &thread) {
-                                        Ok(usage_handoff::Switch::Restarted) => {
-                                            handoff.remember(thread);
+                                    match usage_handoff::switch_account(
+                                        upstream_path,
+                                        &thread,
+                                        kind,
+                                        handoff,
+                                    ) {
+                                        Ok(Some((usage_handoff::Switch::Restarted, kind))) => {
+                                            handoff.remember(thread, kind);
                                             return Ok(());
                                         }
-                                        Ok(usage_handoff::Switch::Reloaded) => {
-                                            usage_handoff::resume(&mut backend, &thread)?;
+                                        Ok(Some((usage_handoff::Switch::Reloaded, kind))) => {
+                                            usage_handoff::resume_or_warn(
+                                                &mut client,
+                                                &mut backend,
+                                                upstream_path,
+                                                &thread,
+                                                kind,
+                                            )?;
                                         }
+                                        Ok(None) => {}
                                         Err(error) => usage_handoff::warn(
                                             &mut client,
                                             Some(&thread),
@@ -321,8 +338,16 @@ fn serve(
                                         )?,
                                     }
                                 }
-                                usage_handoff::Event::Resumed(thread) if handoff.take(&thread) => {
-                                    usage_handoff::resume(&mut backend, &thread)?;
+                                usage_handoff::Event::Resumed(thread) => {
+                                    if let Some(kind) = handoff.take(&thread) {
+                                        usage_handoff::resume_or_warn(
+                                            &mut client,
+                                            &mut backend,
+                                            upstream_path,
+                                            &thread,
+                                            kind,
+                                        )?;
+                                    }
                                 }
                                 _ => {}
                             }
