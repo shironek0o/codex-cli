@@ -31,7 +31,9 @@ codex-auth switch
 codex resume
 ```
 
-The picker shows conversations from the current directory across accounts that share the same Codex home. Use `codex resume --all` to include other directories. See the [session-sharing guide](session-sharing/README.md) for standalone installation and troubleshooting.
+The picker shows conversations from the current directory across accounts that share the same Codex home. Use `codex resume --all` to include other directories.
+
+With two or more ChatGPT accounts saved through `codex-auth login`, the Fish integration can switch to an account with available quota and continue an interrupted turn in the same session. Full installation includes this behavior. See the [session-sharing guide](session-sharing/README.md#continue-after-an-account-usage-limit) for the conditions and the opt-out.
 
 ## Solarized Osaka
 
@@ -51,6 +53,13 @@ Type `$` in Codex to browse installed skills. The installer copies the full fold
 | --- | --- |
 | `$ponytail` | Make the smallest maintainable change that meets the request. |
 | `$inkdrop` | Draft an implementation plan and write it to a note you select. |
+| [`$algo-tutor`](skills/algo-tutor/SKILL.md) | Practice a LeetCode or other algorithm problem with one Socratic question at a time. |
+
+Start a tutoring session with the problem link and your current idea in one message:
+
+```text
+$algo-tutor https://leetcode.com/problems/longest-substring-without-repeating-characters/ I would start from every index and stop when I see a duplicate.
+```
 
 ## Plan in Inkdrop
 

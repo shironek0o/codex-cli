@@ -117,7 +117,7 @@ fn test_shared_connections(
                 Ok((stream, _)) => {
                     let path = upstream_path.clone();
                     let running = server_running.clone();
-                    workers.push(thread::spawn(move || serve(stream, &path, &running)));
+                    workers.push(thread::spawn(move || serve(stream, &path, &running, None)));
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(10))

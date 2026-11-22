@@ -15,6 +15,7 @@ use tungstenite::{Message, WebSocket};
 
 mod self_test;
 mod terminal_output;
+mod usage_handoff;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -231,15 +232,26 @@ fn read_message(ws: &mut WebSocket<UnixStream>) -> Result<Option<Message>> {
     }
 }
 
-// Route every connection to the same daemon so it retains the session writer.
-fn serve(stream: UnixStream, upstream_path: &Path, running: &AtomicBool) -> Result<()> {
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
-    let mut client = tungstenite::accept(stream)?;
+fn connect_backend(upstream_path: &Path) -> Result<WebSocket<UnixStream>> {
     let upstream = UnixStream::connect(upstream_path)?;
     upstream.set_read_timeout(Some(Duration::from_secs(10)))?;
     upstream.set_write_timeout(Some(Duration::from_secs(10)))?;
-    let (mut backend, _) = tungstenite::client("ws://localhost/codex", upstream)?;
+    let (backend, _) = tungstenite::client("ws://localhost/codex", upstream)?;
+    Ok(backend)
+}
+
+// Route every connection to the same daemon so it retains the session writer.
+fn serve(
+    stream: UnixStream,
+    upstream_path: &Path,
+    running: &AtomicBool,
+    handoff: Option<&usage_handoff::Handoff>,
+) -> Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    let mut client = tungstenite::accept(stream)?;
+    let mut backend = connect_backend(upstream_path)?;
+    let mut connection = usage_handoff::Connection::default();
     client
         .get_mut()
         .set_read_timeout(Some(Duration::from_millis(5)))?;
@@ -251,6 +263,9 @@ fn serve(stream: UnixStream, upstream_path: &Path, running: &AtomicBool) -> Resu
             if let Some(message) = read_message(&mut client)? {
                 match message {
                     Message::Text(text) => {
+                        if let Some(handoff) = handoff {
+                            connection.observe_request(text.as_str(), handoff);
+                        }
                         backend.send(Message::Text(share_listing(text.as_str())?.into()))?
                     }
                     Message::Close(_) => return Ok(()),
@@ -264,9 +279,55 @@ fn serve(stream: UnixStream, upstream_path: &Path, running: &AtomicBool) -> Resu
             // Limit each batch so backend events cannot starve keyboard input.
             for _ in 0..32 {
                 match read_message(&mut backend)? {
-                    Some(Message::Text(text)) => client
-                        .send(Message::Text(text))
-                        .map_err(|e| format!("forwarding a backend event to the client: {e}"))?,
+                    Some(Message::Text(text)) => {
+                        let event = if handoff.is_some() {
+                            connection.observe_event(text.as_str())
+                        } else {
+                            usage_handoff::Event::Forward
+                        };
+                        if let usage_handoff::Event::ContinuationReply(accepted) = event {
+                            if !accepted {
+                                usage_handoff::warn(
+                                    &mut client,
+                                    None,
+                                    "Codex rejected the automatic continuation.",
+                                )?;
+                            }
+                            continue;
+                        }
+                        client.send(Message::Text(text)).map_err(|e| {
+                            format!("forwarding a backend event to the client: {e}")
+                        })?;
+                        if let Some(handoff) = handoff {
+                            match event {
+                                usage_handoff::Event::Quota(thread) => {
+                                    usage_handoff::warn(
+                                        &mut client,
+                                        Some(&thread),
+                                        "Account usage limit reached. Checking another saved account…",
+                                    )?;
+                                    match usage_handoff::switch_account(upstream_path, &thread) {
+                                        Ok(usage_handoff::Switch::Restarted) => {
+                                            handoff.remember(thread);
+                                            return Ok(());
+                                        }
+                                        Ok(usage_handoff::Switch::Reloaded) => {
+                                            usage_handoff::resume(&mut backend, &thread)?;
+                                        }
+                                        Err(error) => usage_handoff::warn(
+                                            &mut client,
+                                            Some(&thread),
+                                            &format!("Automatic account switch stopped: {error}."),
+                                        )?,
+                                    }
+                                }
+                                usage_handoff::Event::Resumed(thread) if handoff.take(&thread) => {
+                                    usage_handoff::resume(&mut backend, &thread)?;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     Some(Message::Close(_)) => return Ok(()),
                     Some(Message::Ping(_)) | Some(Message::Pong(_)) => backend.flush()?,
                     Some(_) => return Err(
@@ -383,6 +444,9 @@ fn run_client(binary: &Path, args: &[String]) -> Result<i32> {
     let (listener, socket_path) = directory.listen()?;
     listener.set_nonblocking(true)?;
     let running = Arc::new(AtomicBool::new(true));
+    let handoff = std::env::var_os("CODEX_AUTO_SWITCH_OFF")
+        .is_none()
+        .then(|| Arc::new(usage_handoff::Handoff::default()));
     let endpoint = format!("unix://{}", socket_path.display());
     let mut output = terminal_output::TerminalOutput::prepare(&endpoint)?;
     let mut command = Command::new(binary);
@@ -409,8 +473,10 @@ fn run_client(binary: &Path, args: &[String]) -> Result<i32> {
             Ok((stream, _)) => {
                 let upstream_path = upstream_path.clone();
                 let running = running.clone();
+                let handoff = handoff.clone();
                 workers.push(thread::spawn(move || {
-                    if let Err(error) = serve(stream, &upstream_path, &running) {
+                    if let Err(error) = serve(stream, &upstream_path, &running, handoff.as_deref())
+                    {
                         eprintln!("Shared history error: {error}");
                     }
                 }));

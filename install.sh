@@ -81,6 +81,13 @@ codex_skill_root="$codex_home/skills"
 if [ -d "$skill_root/inkdrop-plan" ] && [ ! -e "$skill_root/inkdrop" ]; then
     mv -T -- "$skill_root/inkdrop-plan" "$skill_root/inkdrop"
 fi
+for root in "$skill_root" "$codex_skill_root"; do
+    if [ ! -e "$root/algo-tutor" ] && [ -f "$root/tutor/SKILL.md" ] &&
+        cmp -s -- skills/algo-tutor/LICENSE "$root/tutor/LICENSE" &&
+        grep -Fxq '# Algorithm Problem Tutor' "$root/tutor/SKILL.md"; then
+        mv -T -- "$root/tutor" "$root/algo-tutor"
+    fi
+done
 for skill in skills/*; do
     [ -f "$skill/SKILL.md" ] || continue
     name=${skill##*/}

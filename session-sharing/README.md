@@ -1,6 +1,6 @@
 # Local session sharing for Codex
 
-Version 1.2.0 lets you switch accounts and continue conversations in the native Codex interface. The `codex resume` picker, `codex resume --last`, and the in-app `/resume` command can find sessions from other accounts that use the same local `CODEX_HOME`.
+Version 1.3.0 lets you switch accounts and continue conversations in the native Codex interface. The `codex resume` picker, `codex resume --last`, and the in-app `/resume` command can find sessions from other accounts that use the same local `CODEX_HOME`.
 
 ## Install
 
@@ -24,6 +24,12 @@ codex resume
 You can also use another account switcher. By default, the picker lists conversations from the current working directory. Use `-C` or `--cd` to specify a directory, or use `codex resume --all` (or **All** in the picker) to browse other directories.
 
 When upgrading from 1.0.0, exit any Codex windows started with that adapter before opening a new terminal. If another independent app-server holds a conversation open, close the conversation in that app and retry. Leave its lock files in place so other running sessions can finish safely.
+
+## Continue after an account usage limit
+
+Save each ChatGPT account with `codex-auth login`, then use the installed `codex` Fish function. When a turn submitted through that terminal fails with an account usage limit, the adapter checks the saved accounts for available quota. It switches to one with confirmed quota if the shared daemon has no other running turns. If the daemon restarts to load the new login, the native interface reconnects to the same session. The adapter then asks Codex to continue the unfinished work using that session's history.
+
+Automatic continuation attempts one handoff per submitted turn. It requires `codex-auth` 0.4.0 or later and a Codex CLI with native reconnect support, verified with 0.171.0. If another session is still running or no account has confirmed quota, the terminal reports the reason. For a terminal that should keep its current account, start it with `CODEX_AUTO_SWITCH_OFF=1 codex`. The normal `codex exec` and explicit `--remote` paths keep their existing behavior.
 
 ## Install on another machine
 
