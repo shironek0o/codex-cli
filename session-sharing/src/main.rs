@@ -14,6 +14,7 @@ use serde_json::Value;
 use tungstenite::{Message, WebSocket};
 
 mod quota_poll;
+mod quota_settings;
 mod quota_wait;
 mod self_test;
 mod terminal_output;
@@ -21,16 +22,21 @@ mod usage_handoff;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+use quota_settings::Setting;
+
 struct PrivateDirectory(PathBuf);
 
 impl PrivateDirectory {
     fn create() -> io::Result<Self> {
+        Self::create_in(&std::env::temp_dir())
+    }
+
+    fn create_in(parent: &Path) -> io::Result<Self> {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("codex-history-{}-{nonce:x}", std::process::id()));
+        let path = parent.join(format!("codex-history-{}-{nonce:x}", std::process::id()));
         DirBuilder::new().mode(0o700).create(&path)?;
         Ok(Self(path))
     }
@@ -249,6 +255,7 @@ fn serve(
     running: &AtomicBool,
     handoff: Option<&usage_handoff::Handoff>,
 ) -> Result<()> {
+    let home = quota_settings::home_for_socket(upstream_path)?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     let mut client = tungstenite::accept(stream)?;
@@ -300,20 +307,27 @@ fn serve(
                         client.send(Message::Text(text)).map_err(|e| {
                             format!("forwarding a backend event to the client: {e}")
                         })?;
-                        if let Some(handoff) = handoff {
-                            match event {
-                                usage_handoff::Event::Quota(thread, kind) => {
-                                    if kind == usage_handoff::ResumeKind::Goal
-                                        && handoff.goal_attempted(&thread)
-                                    {
+                        let Some(handoff) = handoff else {
+                            continue;
+                        };
+                        match event {
+                            usage_handoff::Event::Quota(thread, kind) => {
+                                let is_goal = kind == usage_handoff::ResumeKind::Goal;
+                                if !Setting::Switch.enabled(home) {
+                                    if Setting::Resume.enabled(home) {
                                         quota_wait::schedule_or_warn(
                                             &mut client,
                                             upstream_path,
                                             &thread,
-                                            "Automatic account switch already attempted.",
+                                            &kind,
+                                            "Automatic account switching is off.",
                                         )?;
-                                        continue;
                                     }
+                                    continue;
+                                }
+                                let reason = if is_goal && handoff.goal_attempted(&thread) {
+                                    "Automatic account switch already attempted.".to_owned()
+                                } else {
                                     usage_handoff::warn(
                                         &mut client,
                                         Some(&thread),
@@ -322,7 +336,7 @@ fn serve(
                                     match usage_handoff::switch_account(
                                         upstream_path,
                                         &thread,
-                                        kind,
+                                        &kind,
                                         handoff,
                                     ) {
                                         Ok(Some((usage_handoff::Switch::Restarted, kind))) => {
@@ -337,49 +351,40 @@ fn serve(
                                                 &thread,
                                                 kind,
                                             )?;
+                                            continue;
                                         }
-                                        Ok(None) => quota_wait::schedule_or_warn(
-                                            &mut client,
-                                            upstream_path,
-                                            &thread,
-                                            "Automatic account switch already attempted.",
-                                        )?,
+                                        Ok(None) => "Automatic account switch skipped.".to_owned(),
                                         Err(error) => {
-                                            let reason = format!(
-                                                "Automatic account switch stopped: {error}."
-                                            );
-                                            if kind == usage_handoff::ResumeKind::Goal
-                                                || handoff.goal_attempted(&thread)
-                                            {
-                                                quota_wait::schedule_or_warn(
-                                                    &mut client,
-                                                    upstream_path,
-                                                    &thread,
-                                                    &reason,
-                                                )?;
-                                            } else {
-                                                usage_handoff::warn(
-                                                    &mut client,
-                                                    Some(&thread),
-                                                    &reason,
-                                                )?;
-                                            }
+                                            format!("Automatic account switch stopped: {error}.")
                                         }
                                     }
+                                };
+                                if Setting::Resume.enabled(home) {
+                                    quota_wait::schedule_or_warn(
+                                        &mut client,
+                                        upstream_path,
+                                        &thread,
+                                        &kind,
+                                        &reason,
+                                    )?;
+                                } else if Setting::Switch.enabled(home) {
+                                    usage_handoff::warn(&mut client, Some(&thread), &reason)?;
                                 }
-                                usage_handoff::Event::Resumed(thread) => {
-                                    if let Some(kind) = handoff.take(&thread) {
-                                        usage_handoff::resume_or_warn(
-                                            &mut client,
-                                            &mut backend,
-                                            upstream_path,
-                                            &thread,
-                                            kind,
-                                        )?;
-                                    }
-                                }
-                                _ => {}
                             }
+                            usage_handoff::Event::Resumed(thread) => {
+                                if let Some(kind) = handoff.take(&thread)
+                                    && Setting::Switch.enabled(home)
+                                {
+                                    usage_handoff::resume_or_warn(
+                                        &mut client,
+                                        &mut backend,
+                                        upstream_path,
+                                        &thread,
+                                        kind,
+                                    )?;
+                                }
+                            }
+                            _ => {}
                         }
                     }
                     Some(Message::Close(_)) => return Ok(()),
@@ -412,12 +417,7 @@ fn shared_daemon_socket(binary: &Path, options: &[String]) -> Result<PathBuf> {
         )
         .into());
     }
-    let home = std::env::var_os("CODEX_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
-        .ok_or("cannot locate CODEX_HOME")?;
-    Ok(home.join("app-server-control/app-server-control.sock"))
+    Ok(quota_settings::codex_home()?.join("app-server-control/app-server-control.sock"))
 }
 
 // Exercise the same request filter in environments without Unix sockets.
@@ -498,9 +498,7 @@ fn run_client(binary: &Path, args: &[String]) -> Result<i32> {
     let (listener, socket_path) = directory.listen()?;
     listener.set_nonblocking(true)?;
     let running = Arc::new(AtomicBool::new(true));
-    let handoff = std::env::var_os("CODEX_AUTO_SWITCH_OFF")
-        .is_none()
-        .then(|| Arc::new(usage_handoff::Handoff::default()));
+    let handoff = Arc::new(usage_handoff::Handoff::default());
     let endpoint = format!("unix://{}", socket_path.display());
     let mut output = terminal_output::TerminalOutput::prepare(&endpoint)?;
     let mut command = Command::new(binary);
@@ -529,8 +527,7 @@ fn run_client(binary: &Path, args: &[String]) -> Result<i32> {
                 let running = running.clone();
                 let handoff = handoff.clone();
                 workers.push(thread::spawn(move || {
-                    if let Err(error) = serve(stream, &upstream_path, &running, handoff.as_deref())
-                    {
+                    if let Err(error) = serve(stream, &upstream_path, &running, Some(&handoff)) {
                         eprintln!("Shared history error: {error}");
                     }
                 }));
@@ -563,12 +560,29 @@ fn run_client(binary: &Path, args: &[String]) -> Result<i32> {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    if args
-        .first()
-        .is_some_and(|arg| arg == "--wait-for-goal-quota")
-    {
-        if let Err(error) = quota_wait::run(&args[1..]) {
-            eprintln!("Goal quota watcher: {error}");
+    let setting = match args.first().map(String::as_str) {
+        Some("--auto-switch") => Some(Setting::Switch),
+        Some("--auto-resume") => Some(Setting::Resume),
+        _ => None,
+    };
+    if let Some(setting) = setting {
+        let result = setting.command(&args[1..]);
+        match result {
+            Ok(code) => std::process::exit(code),
+            Err(error) => {
+                eprintln!("Could not read or save the setting: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if args.first().is_some_and(|arg| {
+        matches!(
+            arg.as_str(),
+            "--wait-for-goal-quota" | "--wait-for-turn-quota"
+        )
+    }) {
+        if let Err(error) = quota_wait::run(&args) {
+            eprintln!("Quota watcher: {error}");
             std::process::exit(1);
         }
         return;

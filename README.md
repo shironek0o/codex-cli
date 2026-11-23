@@ -33,7 +33,7 @@ codex resume
 
 The picker shows conversations from the current directory across accounts that share the same Codex home. Use `codex resume --all` to include other directories.
 
-With two or more ChatGPT accounts saved through `codex-auth login`, the Fish integration can switch to an account with available quota and continue an interrupted turn in the same session. In Fish, use `codex auto-switch status`, `codex auto-switch off`, or `codex auto-switch on` to control this behavior for subsequent launches. See the [session-sharing guide](session-sharing/README.md#continue-after-an-account-usage-limit).
+In Fish, use `codex auto-switch on` or `off` to control switching to a saved account when the current one runs out of quota. Use `codex auto-resume on` or `off` to control whether interrupted turns and Goals wait for quota to recover and resume in the same session. Both commands accept `status`. See the [session-sharing guide](session-sharing/README.md#continue-after-an-account-usage-limit).
 
 ## Solarized Osaka
 

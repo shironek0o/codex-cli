@@ -10,13 +10,14 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tungstenite::{Message, WebSocket};
 
+use crate::quota_settings::{Setting, home_for_socket};
 use crate::{Result, connect_backend};
 
 const REQUEST_ID: &str = "codex-session-sharing/continue";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResumeKind {
-    Turn,
+    Turn(String),
     Goal,
 }
 
@@ -154,8 +155,7 @@ impl Connection {
             else {
                 return Event::Forward;
             };
-            let quota = turn["status"] == "failed"
-                && turn["error"]["codexErrorInfo"] == "usageLimitExceeded";
+            let quota = quota_failed_turn(turn);
             if let Some(goal) = self.goals.get_mut(thread) {
                 goal.completed_turn = Some(id.into());
                 if goal.quota_turn.as_deref() == Some(id) {
@@ -166,7 +166,7 @@ impl Connection {
             }
             if let Some(submitted) = self.submitted.remove(id) {
                 if quota && submitted == thread {
-                    return Event::Quota(thread.into(), ResumeKind::Turn);
+                    return Event::Quota(thread.into(), ResumeKind::Turn(id.into()));
                 }
             } else if self
                 .requests
@@ -202,7 +202,7 @@ impl Connection {
                     match self.early_completion.remove(turn) {
                         Some((completed, quota)) if completed == thread => {
                             if quota {
-                                return Event::Quota(thread, ResumeKind::Turn);
+                                return Event::Quota(thread, ResumeKind::Turn(turn.into()));
                             }
                         }
                         _ => {
@@ -244,9 +244,13 @@ fn resume(
     thread: &str,
     kind: ResumeKind,
 ) -> Result<()> {
+    let home = home_for_socket(upstream)?;
     if kind == ResumeKind::Goal {
         if !goal_is_limited(upstream, thread)? {
             return Err("the goal is no longer stopped by the usage limit".into());
+        }
+        if !Setting::Switch.enabled(home) {
+            return Ok(());
         }
         backend.send(rpc_request(
             REQUEST_ID,
@@ -257,15 +261,30 @@ fn resume(
         ))?;
         return Ok(());
     }
-    backend.send(rpc_request(REQUEST_ID, "turn/start", json!({
+    if !Setting::Switch.enabled(home) {
+        return Ok(());
+    }
+    backend.send(rpc_request(
+        REQUEST_ID,
+        "turn/start",
+        continuation_params(thread),
+    ))?;
+    Ok(())
+}
+
+pub(crate) fn quota_failed_turn(turn: &Value) -> bool {
+    turn["status"] == "failed" && turn["error"]["codexErrorInfo"] == "usageLimitExceeded"
+}
+
+pub(crate) fn continuation_params(thread: &str) -> Value {
+    json!({
         "threadId": thread,
         "input": [{
             "type": "text",
             "text": "Continue the unfinished task from the previous turn. Check what was already done before repeating any action.",
             "text_elements": [],
         }],
-    })))?;
-    Ok(())
+    })
 }
 
 pub fn warn(client: &mut WebSocket<UnixStream>, thread: Option<&str>, message: &str) -> Result<()> {
@@ -288,21 +307,21 @@ pub enum Switch {
 pub fn switch_account(
     upstream: &Path,
     failed_thread: &str,
-    kind: ResumeKind,
+    kind: &ResumeKind,
     handoff: &Handoff,
 ) -> Result<Option<(Switch, ResumeKind)>> {
-    let home = upstream
-        .parent()
-        .and_then(Path::parent)
-        .ok_or("invalid daemon socket path")?;
+    let home = home_for_socket(upstream)?;
     let _lock = lock_handoff(home)?;
+    if !Setting::Switch.enabled(home) {
+        return Ok(None);
+    }
     let kind = match goal_is_limited(upstream, failed_thread) {
         Ok(true) => ResumeKind::Goal,
-        Ok(false) if kind == ResumeKind::Goal => {
+        Ok(false) if *kind == ResumeKind::Goal => {
             return Err("the goal is no longer stopped by the usage limit".into());
         }
-        Err(error) if kind == ResumeKind::Goal => return Err(error),
-        _ => ResumeKind::Turn,
+        Err(error) if *kind == ResumeKind::Goal => return Err(error),
+        _ => kind.clone(),
     };
     if kind == ResumeKind::Goal && !handoff.mark_goal_attempt(failed_thread) {
         return Ok(None);
@@ -315,6 +334,9 @@ pub fn switch_account(
     let target =
         eligible_account(&accounts).ok_or("no other saved ChatGPT account has confirmed quota")?;
     check_idle(upstream, failed_thread)?;
+    if !Setting::Switch.enabled(home) {
+        return Ok(None);
+    }
     let reply = auth_command(
         home,
         &["switch", target, "--json"],
@@ -484,7 +506,7 @@ mod tests {
         assert_eq!(connection.observe_event(STARTED), Event::Forward);
         assert_eq!(
             connection.observe_event(QUOTA),
-            Event::Quota("thread".into(), ResumeKind::Turn)
+            Event::Quota("thread".into(), ResumeKind::Turn("turn".into()))
         );
         assert_eq!(connection.observe_event(QUOTA), Event::Forward);
     }
@@ -496,7 +518,7 @@ mod tests {
         assert_eq!(connection.observe_event(QUOTA), Event::Forward);
         assert_eq!(
             connection.observe_event(STARTED),
-            Event::Quota("thread".into(), ResumeKind::Turn)
+            Event::Quota("thread".into(), ResumeKind::Turn("turn".into()))
         );
     }
 
@@ -528,7 +550,7 @@ mod tests {
         assert_eq!(handoff.take("other"), None);
         assert_eq!(handoff.take("thread"), Some(ResumeKind::Goal));
         assert_eq!(handoff.take("thread"), None);
-        handoff.remember("thread".into(), ResumeKind::Turn);
+        handoff.remember("thread".into(), ResumeKind::Turn("turn".into()));
         connection.observe_request(START, &handoff);
         assert_eq!(handoff.take("thread"), None);
     }
